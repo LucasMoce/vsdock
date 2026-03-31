@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vsdock"
+version = "0.1.0"
+description = "Virtual Screening and Molecular Docking Pipeline"
+readme = "README.md"
+requires-python = ">=3.9"
+
+dependencies = [
+    "rdkit",
+    "requests",
+    "pyyaml",
+    "pandas",
+    "matplotlib",
+    "seaborn",
+    "tqdm",
+]
+
+[project.scripts]
+vsdock = "vsdock.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vsdock*"]

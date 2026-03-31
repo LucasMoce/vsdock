@@ -23,9 +23,12 @@ def cmd_init(args):
         "ligand_smiles": smiles,
         "receptor": args.target,
         "config": args.config,
+        "box_center": [0.0, 0.0, 0.0],
+        "box_size":   [20.0, 20.0, 20.0],
     }
     Path("vsdock_state.yaml").write_text(yaml.dump(state))
     print(f"[vsdock] Projeto inicializado. Estado salvo em vsdock_state.yaml")
+    print(f"[vsdock] IMPORTANTE: edite vsdock_state.yaml e defina box_center e box_size antes de rodar o docking.")
 
 
 def cmd_fetch(args):
@@ -72,11 +75,6 @@ def cmd_screen(args):
     )
 
 
-def cmd_dock(args):
-    print(f"[vsdock] Docking (exhaustiveness={args.exhaustiveness}, top={args.top})")
-    print("  -> modulo dock ainda nao implementado")
-
-
 def cmd_analyze(args):
     from vsdock.pains import filter_pains
     import os
@@ -97,6 +95,77 @@ def cmd_analyze(args):
         hits_file=hits_file,
         outdir="hits",
         also_filter_lipinski=not args.no_lipinski,
+    )
+
+
+def cmd_dock(args):
+    from vsdock.dock import dock_all, get_box_from_autobox
+    import yaml, os
+    from pathlib import Path
+
+    state = {}
+    if Path("vsdock_state.yaml").exists():
+        state = yaml.safe_load(Path("vsdock_state.yaml").read_text())
+
+    receptor = args.receptor or state.get("receptor")
+    if not receptor:
+        print("[dock] ERRO: receptor não definido. Use --receptor ou defina em vsdock_state.yaml")
+        raise SystemExit(1)
+
+    # Coordenadas da caixa: autobox > argumento > state > erro
+    if args.autobox_ligand or args.autobox_residues or args.blind:
+        pdb = args.pdb or state.get("pdb")
+        if not pdb:
+            print("[dock] ERRO: --autobox requer --pdb com o arquivo PDB original (com ligante).")
+            raise SystemExit(1)
+        box = get_box_from_autobox(
+            pdb_file=pdb,
+            ligand=args.autobox_ligand,
+            residues=args.autobox_residues,
+            padding=args.padding,
+            blind=args.blind,
+        )
+        center = box["center"]
+        size   = box["size"]
+
+        # Salva no state para reusar
+        state["box_center"] = list(center)
+        state["box_size"]   = list(size)
+        Path("vsdock_state.yaml").write_text(yaml.dump(state))
+
+    elif args.center:
+        center = tuple(args.center)
+        size   = tuple(args.size) if args.size else tuple(state.get("box_size", [20, 20, 20]))
+    elif state.get("box_center") and any(v != 0 for v in state["box_center"]):
+        center = tuple(state["box_center"])
+        size   = tuple(state.get("box_size", [20, 20, 20]))
+    else:
+        print("[dock] ERRO: defina a caixa com --autobox-ligand, --center, ou edite vsdock_state.yaml")
+        raise SystemExit(1)
+
+    hits_file = args.hits_file
+    if not hits_file:
+        candidates = ["hits/hits_clean.csv", "hits/hits.csv"]
+        for c in candidates:
+            if os.path.exists(c):
+                hits_file = c
+                break
+        if not hits_file:
+            print("[dock] ERRO: nenhum arquivo de hits encontrado.")
+            raise SystemExit(1)
+        print(f"[dock] Hits detectados: {hits_file}")
+
+    dock_all(
+        hits_file=hits_file,
+        receptor=receptor,
+        center=center,
+        size=size,
+        outdir="docking",
+        exhaustiveness=args.exhaustiveness,
+        num_modes=args.num_modes,
+        top_n=args.top,
+        reference_smiles=state.get("ligand_smiles"),
+        reference_name=state.get("ligand_name", "reference"),
     )
 
 
@@ -123,9 +192,9 @@ def main():
 
     # --- fetch ---
     p_fetch = subparsers.add_parser("fetch", help="Baixa ligante e/ou banco molecular")
-    p_fetch.add_argument("--ligand", default=None, help="Nome do ligante (PubChem)")
+    p_fetch.add_argument("--ligand", default=None)
     p_fetch.add_argument("--fmt", choices=["sdf", "smiles"], default="sdf")
-    p_fetch.add_argument("--database", action="store_true", help="Baixar banco molecular")
+    p_fetch.add_argument("--database", action="store_true")
     p_fetch.add_argument("--source", choices=["chembl", "zinc"], default="chembl")
     p_fetch.add_argument("--mw-min", type=float, default=150, dest="mw_min")
     p_fetch.add_argument("--mw-max", type=float, default=500, dest="mw_max")
@@ -143,19 +212,36 @@ def main():
     p_screen.add_argument("--database", default=None)
     p_screen.set_defaults(func=cmd_screen)
 
-    # --- dock ---
-    p_dock = subparsers.add_parser("dock", help="Docking com AutoDock Vina")
-    p_dock.add_argument("--exhaustiveness", type=int, default=8)
-    p_dock.add_argument("--top", type=int, default=20)
-    p_dock.set_defaults(func=cmd_dock)
-
     # --- analyze ---
     p_analyze = subparsers.add_parser("analyze", help="Filtro PAINS + Lipinski")
-    p_analyze.add_argument("--hits-file", default=None, dest="hits_file",
-                           help="CSV de hits (detectado automaticamente se omitido)")
-    p_analyze.add_argument("--no-lipinski", action="store_true", dest="no_lipinski",
-                           help="Desativa filtro de Lipinski")
+    p_analyze.add_argument("--hits-file", default=None, dest="hits_file")
+    p_analyze.add_argument("--no-lipinski", action="store_true", dest="no_lipinski")
     p_analyze.set_defaults(func=cmd_analyze)
+
+    # --- dock ---
+    p_dock = subparsers.add_parser("dock", help="Docking com AutoDock Vina")
+    p_dock.add_argument("--receptor", default=None, help="Arquivo .pdbqt do receptor")
+    p_dock.add_argument("--pdb", default=None, help="Arquivo PDB original (para autobox)")
+    # Autobox
+    p_dock.add_argument("--autobox-ligand", default=None, dest="autobox_ligand",
+                        help="ID do ligante cocristalizado para autobox (ex: MRV1101A)")
+    p_dock.add_argument("--autobox-residues", nargs="+", default=None, dest="autobox_residues",
+                        help="Resíduos para definir a caixa (ex: VAL2A LYS4A)")
+    p_dock.add_argument("--blind", action="store_true",
+                        help="Docking cego (caixa = proteína toda)")
+    p_dock.add_argument("--padding", type=float, default=5.0,
+                        help="Padding do autobox em Angstroms (default: 5.0)")
+    # Caixa manual (alternativa ao autobox)
+    p_dock.add_argument("--center", nargs=3, type=float, metavar=("X", "Y", "Z"),
+                        help="Centro da caixa (alternativa ao autobox)")
+    p_dock.add_argument("--size", nargs=3, type=float, metavar=("SX", "SY", "SZ"),
+                        default=None, help="Tamanho da caixa em Å (default: 20 20 20)")
+    # Vina
+    p_dock.add_argument("--exhaustiveness", type=int, default=8)
+    p_dock.add_argument("--num-modes", type=int, default=9, dest="num_modes")
+    p_dock.add_argument("--top", type=int, default=None)
+    p_dock.add_argument("--hits-file", default=None, dest="hits_file")
+    p_dock.set_defaults(func=cmd_dock)
 
     # --- report ---
     p_report = subparsers.add_parser("report", help="Gera relatorio/manuscrito")

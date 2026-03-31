@@ -189,8 +189,8 @@ def cmd_admet(args):
 
 
 def cmd_report(args):
-    print(f"[vsdock] Gerando relatorio (formato: {args.format})")
-    print("  -> modulo report ainda nao implementado")
+    from vsdock.report import generate_report
+    generate_report(outdir="report", project_dir=".", fmt=args.format)
 
 
 def main():

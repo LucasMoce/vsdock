@@ -13,14 +13,11 @@ def cmd_init(args):
 
     print(f"[vsdock] Inicializando projeto '{args.ligand}' ...")
 
-    # Cria estrutura de pastas do projeto
     dirs = ["ligand", "zinc", "hits", "docking", "plip", "admet", "report"]
     for d in dirs:
         Path(d).mkdir(exist_ok=True)
 
-    # Baixa SMILES do ligante e salva em arquivo de estado
     smiles = fetch_ligand_smiles(args.ligand)
-
     state = {
         "ligand_name": args.ligand,
         "ligand_smiles": smiles,
@@ -53,10 +50,8 @@ def cmd_screen(args):
     from vsdock.screen import screen, load_query_from_state
     import glob
 
-    # Carrega SMILES do ligante do estado do projeto
     query_smiles = load_query_from_state()
 
-    # Detecta banco automaticamente se não especificado
     db_file = args.database
     if not db_file:
         candidates = glob.glob("zinc/*.smi") + glob.glob("zinc/*.csv")
@@ -79,17 +74,35 @@ def cmd_screen(args):
 
 def cmd_dock(args):
     print(f"[vsdock] Docking (exhaustiveness={args.exhaustiveness}, top={args.top})")
-    print("  → módulo dock ainda não implementado")
+    print("  -> modulo dock ainda nao implementado")
 
 
 def cmd_analyze(args):
-    print("[vsdock] Análise PAINS + PLIP + ADMET")
-    print("  → módulo analyze ainda não implementado")
+    from vsdock.pains import filter_pains
+    import os
+
+    hits_file = args.hits_file
+    if not hits_file:
+        candidates = ["hits/hits.csv", "hits/hits_clean.csv"]
+        for c in candidates:
+            if os.path.exists(c):
+                hits_file = c
+                break
+        if not hits_file:
+            print("[analyze] ERRO: nenhum arquivo de hits encontrado. Rode 'vsdock screen' primeiro.")
+            raise SystemExit(1)
+        print(f"[analyze] Arquivo detectado: {hits_file}")
+
+    filter_pains(
+        hits_file=hits_file,
+        outdir="hits",
+        also_filter_lipinski=not args.no_lipinski,
+    )
 
 
 def cmd_report(args):
-    print(f"[vsdock] Gerando relatório (formato: {args.format})")
-    print("  → módulo report ainda não implementado")
+    print(f"[vsdock] Gerando relatorio (formato: {args.format})")
+    print("  -> modulo report ainda nao implementado")
 
 
 def main():
@@ -113,8 +126,7 @@ def main():
     p_fetch.add_argument("--ligand", default=None, help="Nome do ligante (PubChem)")
     p_fetch.add_argument("--fmt", choices=["sdf", "smiles"], default="sdf")
     p_fetch.add_argument("--database", action="store_true", help="Baixar banco molecular")
-    p_fetch.add_argument("--source", choices=["chembl", "zinc"], default="chembl",
-                         help="Fonte do banco (default: chembl)")
+    p_fetch.add_argument("--source", choices=["chembl", "zinc"], default="chembl")
     p_fetch.add_argument("--mw-min", type=float, default=150, dest="mw_min")
     p_fetch.add_argument("--mw-max", type=float, default=500, dest="mw_max")
     p_fetch.add_argument("--logp-min", type=float, default=-1, dest="logp_min")
@@ -124,16 +136,11 @@ def main():
 
     # --- screen ---
     p_screen = subparsers.add_parser("screen", help="Triagem por similaridade estrutural")
-    p_screen.add_argument("--similarity", type=float, default=0.4,
-                          help="Threshold de Tanimoto (default: 0.4)")
-    p_screen.add_argument("--fingerprint", choices=["morgan", "maccs", "rdkit"],
-                          default="morgan", help="Tipo de fingerprint (default: morgan)")
-    p_screen.add_argument("--radius", type=int, default=2,
-                          help="Raio para Morgan fingerprint (default: 2)")
-    p_screen.add_argument("--max-hits", type=int, default=500, dest="max_hits",
-                          help="Máximo de hits a retornar (default: 500)")
-    p_screen.add_argument("--database", default=None,
-                          help="Arquivo .smi do banco (detectado automaticamente se omitido)")
+    p_screen.add_argument("--similarity", type=float, default=0.4)
+    p_screen.add_argument("--fingerprint", choices=["morgan", "maccs", "rdkit"], default="morgan")
+    p_screen.add_argument("--radius", type=int, default=2)
+    p_screen.add_argument("--max-hits", type=int, default=500, dest="max_hits")
+    p_screen.add_argument("--database", default=None)
     p_screen.set_defaults(func=cmd_screen)
 
     # --- dock ---
@@ -143,12 +150,15 @@ def main():
     p_dock.set_defaults(func=cmd_dock)
 
     # --- analyze ---
-    p_analyze = subparsers.add_parser("analyze", help="PAINS + PLIP + ADMET")
-    p_analyze.add_argument("--admet-weights", default="configs/default.yaml")
+    p_analyze = subparsers.add_parser("analyze", help="Filtro PAINS + Lipinski")
+    p_analyze.add_argument("--hits-file", default=None, dest="hits_file",
+                           help="CSV de hits (detectado automaticamente se omitido)")
+    p_analyze.add_argument("--no-lipinski", action="store_true", dest="no_lipinski",
+                           help="Desativa filtro de Lipinski")
     p_analyze.set_defaults(func=cmd_analyze)
 
     # --- report ---
-    p_report = subparsers.add_parser("report", help="Gera relatório/manuscrito")
+    p_report = subparsers.add_parser("report", help="Gera relatorio/manuscrito")
     p_report.add_argument("--format", choices=["quarto", "markdown", "html"], default="quarto")
     p_report.set_defaults(func=cmd_report)
 

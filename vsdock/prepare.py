@@ -146,26 +146,26 @@ def _to_pdbqt(pdb_file: Path, outfile: Path, is_receptor: bool = True):
 # ---------------------------------------------------------------------------
 
 def prepare_receptor(
-    ligand_code: str,
+    ligand_code: str = None,
     pdbid: str = None,
     pdb_file: str = None,
     outdir: str = ".",
     keep_heterogens: bool = False,
 ) -> dict:
     """
-    Prepara receptor e identifica ligante cocristalizado a partir de PDB ID ou arquivo.
+    Prepara receptor a partir de PDB ID ou arquivo local.
+    Se ligand_code for omitido, prepara apenas o receptor sem separar ligante.
 
     Parâmetros
     ----------
-    ligand_code      : código de 3 letras do ligante no PDB (ex: "MRV")
-    pdbid            : PDB ID para download automático (ex: "4MBS")
-    pdb_file         : caminho para arquivo PDB local (alternativa ao pdbid)
-    outdir           : pasta do projeto
-    keep_heterogens  : mantém outros HETATM no receptor (cofatores, metais)
+    ligand_code : código de 3 letras do ligante no PDB (ex: "MRV"). Opcional.
+    pdbid       : PDB ID para download automático (ex: "4MBS")
+    pdb_file    : caminho para arquivo PDB local (alternativa ao pdbid)
+    outdir      : pasta do projeto
 
     Retorna
     -------
-    dict com paths: pdb, receptor_pdb, receptor_pdbqt, ligand_pdb, ligand_id
+    dict com paths gerados
     """
     if not pdbid and not pdb_file:
         raise ValueError("Informe --pdbid ou --pdb-file.")
@@ -186,48 +186,73 @@ def prepare_receptor(
     heterogens = _list_heterogens(pdb_path)
     if heterogens:
         print(f"[prepare] Ligantes encontrados no PDB:")
-        for h in heterogens[:10]:  # mostra até 10
+        for h in heterogens[:10]:
             print(f"  {h['resname']}{h['resnum']}{h['chain']}")
         if len(heterogens) > 10:
             print(f"  ... e mais {len(heterogens) - 10}")
+    else:
+        print(f"[prepare] Nenhum ligante encontrado no PDB (apenas receptor).")
 
-    # 3. Separa receptor e ligante
-    receptor_pdb, ligand_pdb = _separate_receptor_ligand(
-        pdb_path, ligand_code, outdir
-    )
+    result = {"pdb": pdb_path}
+
+    # 3. Separa receptor e ligante (se ligand_code fornecido)
+    if ligand_code:
+        receptor_pdb, ligand_pdb = _separate_receptor_ligand(
+            pdb_path, ligand_code, outdir
+        )
+        ligand_ids = [
+            f"{h['resname']}{h['resnum']}{h['chain']}"
+            for h in heterogens
+            if h["resname"] == ligand_code.upper()
+        ]
+        ligand_id = ligand_ids[0] if ligand_ids else f"{ligand_code}1A"
+        result["ligand_pdb"] = ligand_pdb
+        result["ligand_id"]  = ligand_id
+    else:
+        # Sem ligante — prepara receptor removendo apenas água
+        print(f"[prepare] Modo sem ligante — preparando receptor completo...")
+        receptor_lines = []
+        for line in pdb_path.read_text().splitlines():
+            record = line[:6].strip()
+            if record in {"ATOM", "TER", "REMARK", "HEADER", "TITLE", "SEQRES", "CRYST1"}:
+                receptor_lines.append(line)
+            elif record == "HETATM":
+                resname = line[17:20].strip()
+                if resname not in {"HOH", "WAT", "H2O"}:
+                    receptor_lines.append(line)
+        receptor_pdb = outdir / "receptor_clean.pdb"
+        receptor_pdb.write_text("\n".join(receptor_lines) + "\nEND\n")
+        print(f"[prepare] Receptor salvo em: {receptor_pdb}")
+        ligand_id = None
 
     # 4. Converte receptor para PDBQT
     receptor_pdbqt = outdir / "receptor.pdbqt"
     _to_pdbqt(receptor_pdb, receptor_pdbqt, is_receptor=True)
 
-    # 5. Descobre o identificador completo do ligante (para o autobox)
-    ligand_ids = [
-        f"{h['resname']}{h['resnum']}{h['chain']}"
-        for h in heterogens
-        if h["resname"] == ligand_code.upper()
-    ]
-    ligand_id = ligand_ids[0] if ligand_ids else f"{ligand_code}1A"
-
+    # 5. Instrução de uso
     print(f"\n[prepare] Pronto! Use nas próximas etapas:")
     print(f"  --receptor {receptor_pdbqt}")
     print(f"  --pdb      {pdb_path}")
-    print(f"  --autobox-ligand {ligand_id}")
+    if ligand_id:
+        print(f"  --autobox-ligand {ligand_id}")
+    else:
+        print(f"  --blind                     (blind docking)")
+        print(f"  --autobox-residues RES1 RES2 (resíduos do sítio ativo)")
 
-    # 6. Atualiza o state do projeto
+    # 6. Atualiza state
     state_file = outdir / "vsdock_state.yaml"
     if state_file.exists():
         import yaml
         state = yaml.safe_load(state_file.read_text())
         state["receptor"] = str(receptor_pdbqt)
         state["pdb"]      = str(pdb_path)
-        state["ligand_crystal_id"] = ligand_id
+        if ligand_id:
+            state["ligand_crystal_id"] = ligand_id
         state_file.write_text(yaml.dump(state))
         print(f"[prepare] vsdock_state.yaml atualizado.")
 
-    return {
-        "pdb":            pdb_path,
+    result.update({
         "receptor_pdb":   receptor_pdb,
         "receptor_pdbqt": receptor_pdbqt,
-        "ligand_pdb":     ligand_pdb,
-        "ligand_id":      ligand_id,
-    }
+    })
+    return result

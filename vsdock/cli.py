@@ -6,6 +6,17 @@ import argparse
 from vsdock import __version__
 
 
+def cmd_prepare(args):
+    from vsdock.prepare import prepare_receptor
+
+    prepare_receptor(
+        ligand_code=args.ligand_code,
+        pdbid=args.pdbid,
+        pdb_file=args.pdb_file,
+        outdir=".",
+    )
+
+
 def cmd_init(args):
     from vsdock.fetch import fetch_ligand_smiles
     import yaml
@@ -198,6 +209,16 @@ def main():
     parser.add_argument("--version", action="version", version=f"vsdock {__version__}")
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
     subparsers.required = True
+
+    # prepare
+    p = subparsers.add_parser("prepare", help="Baixa e prepara receptor a partir de PDB ID ou arquivo")
+    p.add_argument("--pdbid", default=None,
+                   help="PDB ID para download automático (ex: 4MBS)")
+    p.add_argument("--pdb-file", default=None, dest="pdb_file",
+                   help="Arquivo PDB local (alternativa ao --pdbid)")
+    p.add_argument("--ligand-code", required=True, dest="ligand_code",
+                   help="Código de 3 letras do ligante no PDB (ex: MRV)")
+    p.set_defaults(func=cmd_prepare)
 
     # init
     p = subparsers.add_parser("init", help="Inicializa projeto e baixa ligante")

@@ -34,9 +34,6 @@ pip install plip
 pip install git+https://github.com/LucasMoce/vsdock.git
 ```
 
-Isso instala o vsdock e todas as dependências Python automaticamente
-(RDKit, pandas, requests, ADMET-AI, etc.).
-
 Verifique se funcionou:
 
 ```bash
@@ -47,7 +44,7 @@ vsdock --version
 
 ## Uso
 
-O vsdock é organizado em etapas sequenciais. Cada comando lê os outputs
+O vsdock é organizado em etapas sequenciais. Cada comando detecta os outputs
 do anterior automaticamente — você não precisa passar caminhos de arquivo
 na maioria dos casos.
 
@@ -72,27 +69,70 @@ vsdock init --target receptor.pdbqt --ligand "nome do ligante"
 - Salva o estado em `vsdock_state.yaml`
 
 **Parâmetros:**
-- `--target` : arquivo `.pdbqt` do receptor (precisa estar na pasta do projeto)
 - `--ligand` : nome do ligante como aparece no PubChem (ex: `maraviroc`, `imatinib`)
+- `--target` : nome do arquivo `.pdbqt` do receptor (será gerado na Etapa 2)
 
 **Exemplo:**
 ```bash
 vsdock init --target receptor.pdbqt --ligand maraviroc
 ```
 
-> **Nota:** O receptor `.pdbqt` precisa ser preparado antes. Veja a seção
-> "Preparando o receptor" mais abaixo.
+---
+
+### Etapa 2 — Preparar o receptor
+
+O vsdock pode baixar a estrutura do PDB automaticamente ou usar um arquivo local.
+Ele separa o receptor do ligante cocristalizado e converte tudo para PDBQT.
+
+**A partir de um PDB ID (download automático):**
+```bash
+vsdock prepare --pdbid 4MBS --ligand-code MRV
+```
+
+**A partir de um arquivo PDB local:**
+```bash
+vsdock prepare --pdb-file estrutura.pdb --ligand-code MRV
+```
+
+**O que faz:**
+- Baixa a estrutura do RCSB (se usar `--pdbid`)
+- Lista todos os ligantes encontrados no PDB
+- Separa receptor e ligante cocristalizado em arquivos distintos
+- Converte o receptor para `.pdbqt` via Open Babel
+- Atualiza o `vsdock_state.yaml` com os caminhos gerados
+
+**Parâmetros:**
+- `--pdbid` : PDB ID para download automático (ex: `4MBS`)
+- `--pdb-file` : arquivo PDB local (alternativa ao `--pdbid`)
+- `--ligand-code` : código de 3 letras do ligante no PDB (ex: `MRV`)
+
+**Como descobrir o código do ligante:**
+```bash
+grep "HETATM" estrutura.pdb | awk '{print $4}' | sort -u
+```
+
+**Exemplo de output:**
+```
+[prepare] Ligantes encontrados no PDB:
+  MRV1101A   ← use MRV como --ligand-code
+  OLC1103A
+  ...
+[prepare] Pronto! Use nas próximas etapas:
+  --receptor receptor.pdbqt
+  --pdb      4MBS.pdb
+  --autobox-ligand MRV1101A
+```
 
 ---
 
-### Etapa 2 — Baixar banco molecular
+### Etapa 3 — Baixar banco molecular
 
 ```bash
 vsdock fetch --database --source chembl --max-mols 5000
 ```
 
 **O que faz:**
-- Baixa moléculas do ChEMBL filtradas por peso molecular e logP
+- Baixa moléculas do ChEMBL filtradas por propriedades drug-like
 - Salva em `zinc/chembl_database.smi`
 
 **Parâmetros principais:**
@@ -101,39 +141,34 @@ vsdock fetch --database --source chembl --max-mols 5000
 - `--mw-min` / `--mw-max` : intervalo de peso molecular (padrão: 150–500)
 - `--logp-min` / `--logp-max` : intervalo de logP (padrão: −1 a 5)
 
-**Exemplo com filtros:**
-```bash
-vsdock fetch --database --source chembl --max-mols 2000 --mw-min 200 --mw-max 450
-```
-
 ---
 
-### Etapa 3 — Triagem por similaridade
+### Etapa 4 — Triagem por similaridade
 
 ```bash
 vsdock screen --similarity 0.4 --max-hits 500
 ```
 
 **O que faz:**
-- Compara o ligante de referência com todo o banco usando fingerprints de Morgan
-- Seleciona os compostos mais similares (Tanimoto ≥ threshold)
-- Salva os hits em `hits/hits.csv` e `hits/hits.smi`
+- Compara o ligante de referência com o banco usando fingerprints de Morgan
+- Retém compostos com Tanimoto ≥ threshold
+- Salva os hits em `hits/hits.csv`
 
-**Parâmetros principais:**
+**Parâmetros:**
 - `--similarity` : threshold de Tanimoto de 0 a 1 (padrão: 0.4)
 - `--max-hits` : número máximo de hits (padrão: 500)
-- `--fingerprint` : tipo de fingerprint — `morgan` (padrão), `maccs` ou `rdkit`
+- `--fingerprint` : `morgan` (padrão), `maccs` ou `rdkit`
 
 ---
 
-### Etapa 4 — Filtro PAINS e Lipinski
+### Etapa 5 — Filtro PAINS e Lipinski
 
 ```bash
 vsdock analyze
 ```
 
 **O que faz:**
-- Remove compostos com alertas PAINS (interferentes de ensaios)
+- Remove compostos com alertas PAINS
 - Remove compostos que violam mais de uma regra de Lipinski
 - Salva os aprovados em `hits/hits_clean.csv`
 
@@ -142,35 +177,32 @@ vsdock analyze
 
 ---
 
-### Etapa 5 — Docking molecular
+### Etapa 6 — Docking molecular
 
 ```bash
-vsdock dock --pdb estrutura.pdb --autobox-ligand COD1101A --receptor receptor.pdbqt
+vsdock dock --autobox-ligand MRV1101A
 ```
 
 **O que faz:**
-- Calcula automaticamente a caixa de docking usando o ligante cocristalizado (autobox)
+- Calcula a caixa de docking automaticamente usando o ligante cocristalizado
 - Converte cada hit de SMILES para PDBQT
 - Roda o AutoDock Vina para todos os hits + ligante de referência
 - Salva os scores em `docking/docking_results.csv`
 
 **Parâmetros principais:**
-- `--pdb` : arquivo PDB original com o ligante cocristalizado
-- `--autobox-ligand` : código do ligante no PDB (ex: `MRV1101A`)
-  - Formato: `NOME` + `NÚMERO` + `CADEIA` (ex: `MRV1101A` = ligante MRV, ID 1101, cadeia A)
-  - Para descobrir o código: `grep "HETATM" estrutura.pdb | awk '{print $4, $5, $6}' | sort -u`
-- `--receptor` : arquivo `.pdbqt` do receptor
-- `--exhaustiveness` : exaustividade do Vina (padrão: 8; aumente para resultados mais precisos)
-- `--top` : limita o número de hits a dockar (útil para testes rápidos)
+- `--autobox-ligand` : identificador completo do ligante no PDB (ex: `MRV1101A`)
+  - Informado automaticamente pelo `vsdock prepare`
+- `--exhaustiveness` : exaustividade do Vina (padrão: 8)
+- `--top` : limita o número de hits a dockar (útil para testes)
 
-**Alternativa sem PDB (coordenadas manuais):**
+**Alternativa com coordenadas manuais:**
 ```bash
-vsdock dock --center X Y Z --size 20 20 20 --receptor receptor.pdbqt
+vsdock dock --center X Y Z --size 20 20 20
 ```
 
 ---
 
-### Etapa 6 — Análise de interações (PLIP)
+### Etapa 7 — Análise de interações (PLIP)
 
 ```bash
 vsdock plip --top-n 10
@@ -186,38 +218,38 @@ vsdock plip --top-n 10
 
 ---
 
-### Etapa 7 — Predição ADMET
+### Etapa 8 — Predição ADMET
 
 ```bash
 vsdock admet
 ```
 
 **O que faz:**
-- Prediz ~100 propriedades ADMET usando ADMET-AI (modelos locais, offline)
-- Calcula um score ponderado por endpoint (configurável)
+- Prediz ~100 propriedades ADMET usando ADMET-AI (offline, sem GPU necessária)
+- Calcula um score ponderado configurável por endpoint
 - Salva em `admet/admet_results.csv` e `admet/admet_summary.csv`
 
 **Parâmetros:**
-- `--atc-code` : código ATC para comparação com DrugBank (ex: `J05` para antivirais,
-  `C09` para cardiovascular). Veja códigos em [whocc.no/atc](https://www.whocc.no/atc/)
-- `--weights` : arquivo YAML com pesos personalizados por endpoint
+- `--atc-code` : código ATC para comparação com DrugBank
+  (ex: `J05` para antivirais, `C09` para cardiovascular)
+- `--weights` : YAML com pesos personalizados por endpoint
 
-**Personalizando os pesos ADMET** (edite `configs/default.yaml`):
+**Personalizando os pesos** (edite `configs/default.yaml`):
 ```yaml
 admet:
-  hERG: 0.9              # cardiotoxicidade — peso alto
+  hERG: 0.9              # cardiotoxicidade
   DILI: 0.8              # hepatotoxicidade
   Hepatotoxicity_Xu: 0.8
   AMES: 0.7              # mutagenicidade
   ClinTox: 0.8
   Bioavailability_Ma: 0.7
   Solubility_AqSolDB: 0.6
-  BBB_Martini: 0.3       # barreira hematoencefálica — menos relevante para antivirais
+  BBB_Martini: 0.3       # menos relevante para antivirais periféricos
 ```
 
 ---
 
-### Etapa 8 — Gerar manuscrito
+### Etapa 9 — Gerar manuscrito
 
 ```bash
 vsdock report --format markdown
@@ -225,65 +257,62 @@ vsdock report --format markdown
 
 **O que faz:**
 - Consolida todos os resultados em um manuscrito estruturado
-- Preenche automaticamente a seção de métodos com os parâmetros usados
+- Preenche automaticamente a seção de métodos com os parâmetros reais usados
 - Gera tabelas de docking, PLIP e ADMET prontas para o artigo
 - Marca com `[TO COMPLETE]` as seções que precisam de redação manual
 
 **Formatos:**
 - `markdown` (padrão) → `report/manuscript.md`
-- `quarto` → `report/manuscript.qmd` (renderizável com [Quarto](https://quarto.org))
+- `quarto` → `report/manuscript.qmd`
 - `html` → `report/manuscript.html`
 
 ---
 
-## Preparando o receptor
-
-O receptor precisa estar em formato `.pdbqt`. O jeito mais simples:
+## Fluxo completo
 
 ```bash
-# 1. Baixe a estrutura do PDB (ex: 4MBS)
-# Em https://www.rcsb.org — Download Files → PDB Format
+mkdir meu_projeto && cd meu_projeto
 
-# 2. Extraia apenas a proteína (remove água e ligantes)
-grep "^ATOM" estrutura.pdb > receptor_clean.pdb
-
-# 3. Converta para PDBQT
-obabel receptor_clean.pdb -O receptor.pdbqt -xr
+vsdock init --target receptor.pdbqt --ligand maraviroc
+vsdock prepare --pdbid 4MBS --ligand-code MRV
+vsdock fetch --database --source chembl --max-mols 2000
+vsdock screen --similarity 0.4 --max-hits 500
+vsdock analyze
+vsdock dock --autobox-ligand MRV1101A
+vsdock plip --top-n 10
+vsdock admet --atc-code J05
+vsdock report --format markdown
 ```
-
-> **Recomendação:** Para resultados mais precisos, use o
-> [MGLTools](https://ccsb.scripps.edu/mgltools/) para preparar o receptor,
-> pois ele calcula cargas parciais de forma mais robusta.
 
 ---
 
 ## Estrutura de pastas gerada
 
-Após rodar o pipeline completo, seu projeto terá esta estrutura:
-
 ```
 meu_projeto/
-├── vsdock_state.yaml       ← estado do projeto (parâmetros, SMILES, receptor)
-├── receptor.pdbqt          ← receptor preparado
-├── 4MBS.pdb                ← estrutura original (para autobox)
+├── vsdock_state.yaml        ← estado do projeto (atualizado automaticamente)
+├── 4MBS.pdb                 ← estrutura original
+├── receptor_clean.pdb       ← receptor sem ligante
+├── receptor.pdbqt           ← receptor pronto para docking
+├── mrv_crystal.pdb          ← ligante cocristalizado isolado
 ├── zinc/
-│   └── chembl_database.smi ← banco molecular baixado
+│   └── chembl_database.smi  ← banco molecular
 ├── hits/
-│   ├── hits.csv            ← hits do screening
-│   ├── hits_clean.csv      ← hits após filtro PAINS/Lipinski
+│   ├── hits.csv             ← hits do screening
+│   ├── hits_clean.csv       ← hits após filtro PAINS/Lipinski
 │   └── hits_pains_report.csv
 ├── docking/
-│   ├── docking_results.csv ← scores ranqueados
-│   ├── pdbqt/              ← estruturas 3D dos ligantes
-│   └── poses/              ← poses geradas pelo Vina
+│   ├── docking_results.csv  ← scores ranqueados
+│   ├── pdbqt/               ← estruturas 3D dos ligantes
+│   └── poses/               ← poses geradas pelo Vina
 ├── plip/
 │   ├── plip_interactions.csv
 │   └── plip_summary.csv
 ├── admet/
-│   ├── admet_results.csv   ← predições completas (106 propriedades)
-│   └── admet_summary.csv   ← endpoints principais
+│   ├── admet_results.csv    ← predições completas (~100 propriedades)
+│   └── admet_summary.csv    ← endpoints principais
 └── report/
-    └── manuscript.md       ← manuscrito gerado automaticamente
+    └── manuscript.md        ← manuscrito gerado automaticamente
 ```
 
 ---
@@ -298,6 +327,7 @@ Se usar o vsdock num artigo, cite os programas subjacentes:
 - **RDKit:** [rdkit.org](https://www.rdkit.org)
 - **Open Babel:** O'Boyle et al., *J. Cheminform.* 2011
 - **autobox:** [github.com/omixlab/autobox](https://github.com/omixlab/autobox)
+- **ChEMBL:** Mendez et al., *Nucleic Acids Res.* 2019
 
 ---
 
@@ -311,8 +341,8 @@ vsdock --version
 ```
 
 **Docking com scores próximos de zero**
-- Verifique as coordenadas da caixa — use sempre `--autobox-ligand` com o PDB original
-- Confirme que o receptor está na mesma posição do ligante cocristalizado
+- Use sempre `vsdock prepare` para gerar o receptor e a caixa automaticamente
+- Confirme que o `--autobox-ligand` corresponde ao ligante no PDB
 
 **ADMET-AI falha com erro de GPU**
 - Já tratado internamente — roda em CPU automaticamente
@@ -320,3 +350,7 @@ vsdock --version
 
 **ZINC retorna erro SSL**
 - Use `--source chembl` (padrão e recomendado)
+
+**Ligante não encontrado no `vsdock prepare`**
+- Verifique o código correto com:
+  `grep "HETATM" estrutura.pdb | awk '{print $4}' | sort -u`

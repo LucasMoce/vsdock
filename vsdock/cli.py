@@ -157,16 +157,34 @@ def cmd_plip(args):
         if os.path.exists("docking/docking_results.csv"):
             docking_file = "docking/docking_results.csv"
         else:
-            print("[plip] ERRO: nenhum resultado de docking encontrado. Rode 'vsdock dock' primeiro.")
+            print("[plip] ERRO: nenhum resultado de docking encontrado.")
             raise SystemExit(1)
     print(f"[plip] Resultados de docking: {docking_file}")
 
     analyze_plip(
-        docking_results=docking_file,
-        receptor_pdbqt=receptor,
-        poses_dir=args.poses_dir,
-        outdir="plip",
-        top_n=args.top_n,
+        docking_results=docking_file, receptor_pdbqt=receptor,
+        poses_dir=args.poses_dir, outdir="plip", top_n=args.top_n,
+    )
+
+
+def cmd_admet(args):
+    from vsdock.admet import predict_admet
+    import os
+
+    hits_file = args.hits_file
+    if not hits_file:
+        for c in ["docking/docking_results.csv", "hits/hits_clean.csv", "hits/hits.csv"]:
+            if os.path.exists(c):
+                hits_file = c
+                break
+    if not hits_file:
+        print("[admet] ERRO: nenhum arquivo de hits encontrado.")
+        raise SystemExit(1)
+    print(f"[admet] Arquivo detectado: {hits_file}")
+
+    predict_admet(
+        hits_file=hits_file, outdir="admet",
+        weights_config=args.weights, atc_code=args.atc_code,
     )
 
 
@@ -237,9 +255,18 @@ def main():
     p.add_argument("--receptor", default=None)
     p.add_argument("--docking-file", default=None, dest="docking_file")
     p.add_argument("--poses-dir", default="docking/poses", dest="poses_dir")
-    p.add_argument("--top-n", type=int, default=10, dest="top_n",
-                   help="Número de melhores hits para analisar (default: 10)")
+    p.add_argument("--top-n", type=int, default=10, dest="top_n")
     p.set_defaults(func=cmd_plip)
+
+    # admet
+    p = subparsers.add_parser("admet", help="Predição de propriedades ADMET")
+    p.add_argument("--hits-file", default=None, dest="hits_file",
+                   help="CSV de hits (detectado automaticamente se omitido)")
+    p.add_argument("--weights", default=None,
+                   help="YAML com pesos por endpoint (default: configs/default.yaml)")
+    p.add_argument("--atc-code", default=None, dest="atc_code",
+                   help="Código ATC para comparação com DrugBank (ex: J05 para antivirais)")
+    p.set_defaults(func=cmd_admet)
 
     # report
     p = subparsers.add_parser("report", help="Gera relatorio/manuscrito")

@@ -50,8 +50,31 @@ def cmd_fetch(args):
 
 
 def cmd_screen(args):
-    print(f"[vsdock] Screening (similaridade >= {args.similarity})")
-    print("  → módulo screen ainda não implementado")
+    from vsdock.screen import screen, load_query_from_state
+    import glob
+
+    # Carrega SMILES do ligante do estado do projeto
+    query_smiles = load_query_from_state()
+
+    # Detecta banco automaticamente se não especificado
+    db_file = args.database
+    if not db_file:
+        candidates = glob.glob("zinc/*.smi") + glob.glob("zinc/*.csv")
+        if not candidates:
+            print("[screen] ERRO: nenhum banco encontrado em zinc/. Rode 'vsdock fetch --database' primeiro.")
+            raise SystemExit(1)
+        db_file = candidates[0]
+        print(f"[screen] Banco detectado: {db_file}")
+
+    screen(
+        query_smiles=query_smiles,
+        database_file=db_file,
+        outdir="hits",
+        threshold=args.similarity,
+        fp_type=args.fingerprint,
+        radius=args.radius,
+        max_hits=args.max_hits,
+    )
 
 
 def cmd_dock(args):
@@ -100,9 +123,17 @@ def main():
     p_fetch.set_defaults(func=cmd_fetch)
 
     # --- screen ---
-    p_screen = subparsers.add_parser("screen", help="Triagem por similaridade")
-    p_screen.add_argument("--similarity", type=float, default=0.4)
-    p_screen.add_argument("--zinc-filters", default="")
+    p_screen = subparsers.add_parser("screen", help="Triagem por similaridade estrutural")
+    p_screen.add_argument("--similarity", type=float, default=0.4,
+                          help="Threshold de Tanimoto (default: 0.4)")
+    p_screen.add_argument("--fingerprint", choices=["morgan", "maccs", "rdkit"],
+                          default="morgan", help="Tipo de fingerprint (default: morgan)")
+    p_screen.add_argument("--radius", type=int, default=2,
+                          help="Raio para Morgan fingerprint (default: 2)")
+    p_screen.add_argument("--max-hits", type=int, default=500, dest="max_hits",
+                          help="Máximo de hits a retornar (default: 500)")
+    p_screen.add_argument("--database", default=None,
+                          help="Arquivo .smi do banco (detectado automaticamente se omitido)")
     p_screen.set_defaults(func=cmd_screen)
 
     # --- dock ---

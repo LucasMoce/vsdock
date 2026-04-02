@@ -21,7 +21,7 @@ def cmd_init(args):
     from pathlib import Path
 
     ligand = args.ligand
-    dirs = ["ligand", "zinc", "hits", "docking", "plip", "admet", "report"]
+    dirs = ["ligand", "zinc", "hits", "docking", "plip", "plif", "admet", "report"]
     for d in dirs:
         Path(d).mkdir(exist_ok=True)
 
@@ -48,8 +48,7 @@ def cmd_init(args):
     print(f"[vsdock] Projeto inicializado. Estado salvo em vsdock_state.yaml")
 
     if not ligand:
-        print(f"[vsdock] Modo sem ligante: etapa 'screen' será pulada automaticamente.")
-        print(f"[vsdock] Use 'vsdock dock --blind' ou 'vsdock dock --autobox-residues RES1 RES2'")
+        print(f"[vsdock] Modo sem ligante: etapa 'similarity-search' será pulada automaticamente.")
 
 
 def cmd_fetch(args):
@@ -59,15 +58,22 @@ def cmd_fetch(args):
         fetch_ligand(args.ligand, outdir="ligand", fmt=args.fmt)
     if args.database:
         fetch_database(
-            outdir="zinc", source=args.source,
-            mw_min=args.mw_min, mw_max=args.mw_max,
-            logp_min=args.logp_min, logp_max=args.logp_max,
+            outdir="zinc",
+            source=args.source,
+            mw_min=args.mw_min,
+            mw_max=args.mw_max,
+            logp_min=args.logp_min,
+            logp_max=args.logp_max,
             max_mols=args.max_mols,
             available_only=args.available,
+            fda_only=args.fda,
+            natural_only=args.natural_compounds,
+            fragments=args.fragments,
+            druglike=not args.fragments,
         )
 
 
-def cmd_screen(args):
+def cmd_similarity_search(args):
     from pathlib import Path
     import yaml, glob
 
@@ -76,8 +82,8 @@ def cmd_screen(args):
         state = yaml.safe_load(Path("vsdock_state.yaml").read_text())
 
     if not state.get("has_reference_ligand", True) or not state.get("ligand_smiles"):
-        print("[screen] Modo sem ligante de referência detectado.")
-        print("[screen] Etapa de screening pulada — o banco será usado diretamente no docking.")
+        print("[similarity-search] Modo sem ligante de referência detectado.")
+        print("[similarity-search] Etapa pulada — banco usado diretamente no docking.")
         return
 
     from vsdock.screen import screen, load_query_from_state
@@ -86,20 +92,28 @@ def cmd_screen(args):
     if not db_file:
         candidates = glob.glob("zinc/*.smi") + glob.glob("zinc/*.csv")
         if not candidates:
-            print("[screen] ERRO: nenhum banco encontrado em zinc/.")
+            print("[similarity-search] ERRO: nenhum banco encontrado em zinc/.")
             raise SystemExit(1)
         db_file = candidates[0]
-        print(f"[screen] Banco detectado: {db_file}")
+        print(f"[similarity-search] Banco detectado: {db_file}")
+
+    # Salva threshold no state para o report
+    state["screen_threshold"] = args.similarity
+    Path("vsdock_state.yaml").write_text(yaml.dump(state))
 
     screen(
-        query_smiles=query_smiles, database_file=db_file,
-        outdir="hits", threshold=args.similarity,
-        fp_type=args.fingerprint, radius=args.radius, max_hits=args.max_hits,
+        query_smiles=query_smiles,
+        database_file=db_file,
+        outdir="hits",
+        threshold=args.similarity,
+        fp_type=args.fingerprint,
+        radius=args.radius,
+        max_hits=args.max_hits,
     )
 
 
-def cmd_analyze(args):
-    from vsdock.pains import filter_pains
+def cmd_clear_library(args):
+    from vsdock.clear_library import filter_library
     import os
 
     hits_file = args.hits_file
@@ -109,10 +123,46 @@ def cmd_analyze(args):
                 hits_file = c
                 break
     if not hits_file:
-        print("[analyze] ERRO: nenhum arquivo de hits encontrado.")
+        print("[clear-library] ERRO: nenhum arquivo de hits encontrado.")
         raise SystemExit(1)
-    print(f"[analyze] Arquivo detectado: {hits_file}")
-    filter_pains(hits_file=hits_file, outdir="hits", also_filter_lipinski=not args.no_lipinski)
+    print(f"[clear-library] Arquivo detectado: {hits_file}")
+
+    # Se nenhum filtro for especificado, aplica PAINS + Lipinski por padrão
+    apply_pains    = args.pains    or (not args.pains and not args.pfizer and not args.gsk)
+    apply_lipinski = args.lipinski or (not args.lipinski and not args.pfizer and not args.gsk)
+
+    filter_library(
+        hits_file=hits_file,
+        outdir="hits",
+        apply_pains=apply_pains,
+        apply_lipinski=apply_lipinski,
+        apply_pfizer=args.pfizer,
+        apply_gsk=args.gsk,
+    )
+
+
+def cmd_optimize_geometry(args):
+    from vsdock.optimize_geometry import optimize_geometry
+    import os
+
+    hits_file = args.hits_file
+    if not hits_file:
+        for c in ["hits/hits_clean.csv", "hits/hits.csv"]:
+            if os.path.exists(c):
+                hits_file = c
+                break
+    if not hits_file:
+        print("[optimize] ERRO: nenhum arquivo de hits encontrado.")
+        raise SystemExit(1)
+    print(f"[optimize] Arquivo detectado: {hits_file}")
+
+    optimize_geometry(
+        hits_file=hits_file,
+        outdir="hits",
+        force_field=args.force_field,
+        max_iters=args.max_iters,
+        remove_salts=not args.keep_salts,
+    )
 
 
 def _bank_to_hits_csv() -> str:
@@ -134,7 +184,7 @@ def _bank_to_hits_csv() -> str:
     lines = [l.strip() for l in open(src) if l.strip()]
     rows = []
     for line in lines:
-        parts = line.split()
+        parts  = line.split()
         smiles = parts[0]
         mol_id = parts[1] if len(parts) > 1 else f"mol_{len(rows)}"
         rows.append({"smiles": smiles, "id": mol_id, "tanimoto": None})
@@ -182,11 +232,8 @@ def cmd_dock(args):
         size   = tuple(state.get("box_size", [20, 20, 20]))
     else:
         print(
-            "[dock] ERRO: defina o sítio de docking com uma das opções:\n"
-            "  --autobox-ligand MRV1101A\n"
-            "  --autobox-residues VAL2A LYS4A\n"
-            "  --blind\n"
-            "  --center X Y Z"
+            "[dock] ERRO: defina o sítio com --autobox-ligand, "
+            "--autobox-residues, --blind ou --center."
         )
         raise SystemExit(1)
 
@@ -195,7 +242,8 @@ def cmd_dock(args):
 
     if not hits_file:
         if has_ref:
-            for c in ["hits/hits_clean.csv", "hits/hits.csv"]:
+            # Prefere geometria otimizada se disponível
+            for c in ["hits/hits_optimized.csv", "hits/hits_clean.csv", "hits/hits.csv"]:
                 if os.path.exists(c):
                     hits_file = c
                     break
@@ -208,9 +256,14 @@ def cmd_dock(args):
     print(f"[dock] Moléculas detectadas: {hits_file}")
 
     dock_all(
-        hits_file=hits_file, receptor=receptor, center=center, size=size,
-        outdir="docking", exhaustiveness=args.exhaustiveness,
-        num_modes=args.num_modes, top_n=args.top,
+        hits_file=hits_file,
+        receptor=receptor,
+        center=center,
+        size=size,
+        outdir="docking",
+        exhaustiveness=args.exhaustiveness,
+        num_modes=args.num_modes,
+        top_n=args.top,
         reference_smiles=state.get("ligand_smiles"),
         reference_name=state.get("ligand_name", "reference"),
     )
@@ -237,17 +290,25 @@ def cmd_plip(args):
         else:
             print("[plip] ERRO: nenhum resultado de docking encontrado.")
             raise SystemExit(1)
-    print(f"[plip] Resultados de docking: {docking_file}")
 
     analyze_plip(
-        docking_results=docking_file, receptor_pdbqt=receptor,
-        poses_dir=args.poses_dir, outdir="plip", top_n=args.top_n,
+        docking_results=docking_file,
+        receptor_pdbqt=receptor,
+        poses_dir=args.poses_dir,
+        outdir="plip",
+        top_n=args.top_n,
     )
 
 
 def cmd_admet(args):
-    from vsdock.admet import predict_admet
-    import os
+    from vsdock.admet import predict_admet, list_admet_filters, apply_admet_filters
+    import os, yaml
+    from pathlib import Path
+
+    # --list-filters: apenas lista os endpoints disponíveis e sai
+    if args.list_filters:
+        list_admet_filters()
+        return
 
     hits_file = args.hits_file
     if not hits_file:
@@ -261,10 +322,26 @@ def cmd_admet(args):
         raise SystemExit(1)
     print(f"[admet] Arquivo detectado: {hits_file}")
 
-    predict_admet(
-        hits_file=hits_file, outdir="admet",
-        weights_config=args.weights, atc_code=args.atc_code,
+    state = {}
+    if Path("vsdock_state.yaml").exists():
+        state = yaml.safe_load(Path("vsdock_state.yaml").read_text())
+
+    df = predict_admet(
+        hits_file=hits_file,
+        outdir="admet",
+        weights_config=args.weights,
+        atc_code=args.atc_code,
     )
+
+    # --apply-filters + --filter-by
+    if args.apply_filters and args.filter_by:
+        apply_admet_filters(
+            df=df,
+            filter_by=args.filter_by,
+            filters=args.apply_filters,
+            outdir="admet",
+            reference_name=state.get("ligand_name"),
+        )
 
 
 def cmd_report(args):
@@ -273,7 +350,10 @@ def cmd_report(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="vsdock", description="Virtual Screening and Docking Pipeline")
+    parser = argparse.ArgumentParser(
+        prog="vsdock",
+        description="Virtual Screening and Docking Pipeline",
+    )
     parser.add_argument("--version", action="version", version=f"vsdock {__version__}")
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
     subparsers.required = True
@@ -297,30 +377,51 @@ def main():
     p.add_argument("--ligand", default=None)
     p.add_argument("--fmt", choices=["sdf", "smiles"], default="sdf")
     p.add_argument("--database", action="store_true")
-    p.add_argument("--source", choices=["chembl", "zinc"], default="chembl")
+    p.add_argument("--source", choices=["chembl", "pubchem", "zinc"], default="chembl")
     p.add_argument("--mw-min", type=float, default=150, dest="mw_min")
     p.add_argument("--mw-max", type=float, default=500, dest="mw_max")
     p.add_argument("--logp-min", type=float, default=-1, dest="logp_min")
     p.add_argument("--logp-max", type=float, default=5, dest="logp_max")
     p.add_argument("--max-mols", type=int, default=500, dest="max_mols")
     p.add_argument("--available", action="store_true",
-                   help="Filtra apenas compostos comercialmente disponíveis (ChEMBL)")
+                   help="Apenas compostos comercialmente disponíveis")
+    p.add_argument("--fda", action="store_true",
+                   help="Apenas compostos FDA-aprovados (max_phase=4)")
+    p.add_argument("--natural-compounds", action="store_true", dest="natural_compounds",
+                   help="Apenas produtos naturais")
+    p.add_argument("--fragments", action="store_true",
+                   help="Modo fragment-like (Regra de 3: MW≤300, logP≤3)")
+    p.add_argument("--druglike", action="store_true", default=True,
+                   help="Modo drug-like / Lipinski Ro5 (padrão)")
     p.set_defaults(func=cmd_fetch)
 
-    # screen
-    p = subparsers.add_parser("screen", help="Triagem por similaridade estrutural")
+    # similarity-search
+    p = subparsers.add_parser("similarity-search", help="Triagem por similaridade estrutural")
     p.add_argument("--similarity", type=float, default=0.4)
     p.add_argument("--fingerprint", choices=["morgan", "maccs", "rdkit"], default="morgan")
     p.add_argument("--radius", type=int, default=2)
     p.add_argument("--max-hits", type=int, default=500, dest="max_hits")
     p.add_argument("--database", default=None)
-    p.set_defaults(func=cmd_screen)
+    p.set_defaults(func=cmd_similarity_search)
 
-    # analyze
-    p = subparsers.add_parser("analyze", help="Filtro PAINS + Lipinski")
+    # clear-library
+    p = subparsers.add_parser("clear-library", help="Filtragem da biblioteca (PAINS, Lipinski, Pfizer, GSK)")
     p.add_argument("--hits-file", default=None, dest="hits_file")
-    p.add_argument("--no-lipinski", action="store_true", dest="no_lipinski")
-    p.set_defaults(func=cmd_analyze)
+    p.add_argument("--pains", action="store_true", help="Aplica filtro PAINS")
+    p.add_argument("--lipinski", action="store_true", help="Aplica filtro de Lipinski")
+    p.add_argument("--pfizer", action="store_true", help="Aplica filtro de Pfizer")
+    p.add_argument("--gsk", action="store_true", help="Aplica filtro de GSK")
+    p.set_defaults(func=cmd_clear_library)
+
+    # optimize-library-geometry
+    p = subparsers.add_parser("optimize-library-geometry",
+                               help="Minimização de energia e otimização de geometria dos ligantes")
+    p.add_argument("--hits-file", default=None, dest="hits_file")
+    p.add_argument("--force-field", choices=["mmff94", "uff"], default="mmff94", dest="force_field")
+    p.add_argument("--max-iters", type=int, default=2000, dest="max_iters")
+    p.add_argument("--keep-salts", action="store_true", dest="keep_salts",
+                   help="Não remove sais/contrafragmentos do SMILES")
+    p.set_defaults(func=cmd_optimize_geometry)
 
     # dock
     p = subparsers.add_parser("dock", help="Docking com AutoDock Vina")
@@ -351,10 +452,20 @@ def main():
     p.add_argument("--hits-file", default=None, dest="hits_file")
     p.add_argument("--weights", default=None)
     p.add_argument("--atc-code", default=None, dest="atc_code")
+    p.add_argument("--list-filters", action="store_true", dest="list_filters",
+                   help="Lista todos os endpoints ADMET disponíveis para filtragem")
+    p.add_argument("--apply-filters", nargs="+", default=None, dest="apply_filters",
+                   metavar="ENDPOINT",
+                   help="Endpoints ADMET para filtrar (ex: hERG DILI AMES)")
+    p.add_argument("--filter-by", default=None, dest="filter_by",
+                   choices=["reference_compound", "thresholds"],
+                   help="Critério de filtragem: reference_compound ou thresholds")
+    p.add_argument("--thresholds", default=None,
+                   help="Thresholds para filtro (ex: 'hERG<0.5,DILI<0.3')")
     p.set_defaults(func=cmd_admet)
 
     # report
-    p = subparsers.add_parser("report", help="Gera relatorio/manuscrito")
+    p = subparsers.add_parser("report", help="Gera relatório/manuscrito")
     p.add_argument("--format", choices=["quarto", "markdown", "html"], default="quarto")
     p.set_defaults(func=cmd_report)
 

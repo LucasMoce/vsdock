@@ -269,6 +269,38 @@ def cmd_dock(args):
     )
 
 
+def cmd_plif(args):
+    from vsdock.plif import compute_plif
+    import os, yaml
+    from pathlib import Path
+
+    state = {}
+    if Path("vsdock_state.yaml").exists():
+        state = yaml.safe_load(Path("vsdock_state.yaml").read_text())
+
+    receptor = args.receptor or state.get("receptor")
+    if not receptor:
+        print("[plif] ERRO: receptor não definido.")
+        raise SystemExit(1)
+
+    docking_file = args.docking_file
+    if not docking_file:
+        if os.path.exists("docking/docking_results.csv"):
+            docking_file = "docking/docking_results.csv"
+        else:
+            print("[plif] ERRO: nenhum resultado de docking encontrado.")
+            raise SystemExit(1)
+
+    compute_plif(
+        docking_results=docking_file,
+        receptor_pdbqt=receptor,
+        poses_dir=args.poses_dir,
+        outdir="plif",
+        top_n=args.top_n,
+        heatmap=args.heatmap,
+    )
+
+
 def cmd_plip(args):
     from vsdock.plip import analyze_plip
     import os, yaml
@@ -439,6 +471,16 @@ def main():
     p.add_argument("--top", type=int, default=None)
     p.add_argument("--hits-file", default=None, dest="hits_file")
     p.set_defaults(func=cmd_dock)
+
+    # plif
+    p = subparsers.add_parser("plif", help="Protein-Ligand Interaction Fingerprint (ProLIF)")
+    p.add_argument("--receptor", default=None)
+    p.add_argument("--docking-file", default=None, dest="docking_file")
+    p.add_argument("--poses-dir", default="docking/poses", dest="poses_dir")
+    p.add_argument("--top-n", type=int, default=10, dest="top_n")
+    p.add_argument("--heatmap", action="store_true",
+                   help="Gera heatmap PNG das interações (requer display/matplotlib)")
+    p.set_defaults(func=cmd_plif)
 
     # plip
     p = subparsers.add_parser("plip", help="Análise de interações proteína-ligante")

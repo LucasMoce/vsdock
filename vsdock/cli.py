@@ -8,7 +8,6 @@ from vsdock import __version__
 
 def cmd_prepare(args):
     from vsdock.prepare import prepare_receptor
-
     prepare_receptor(
         ligand_code=args.ligand_code,
         pdbid=args.pdbid,
@@ -64,6 +63,7 @@ def cmd_fetch(args):
             mw_min=args.mw_min, mw_max=args.mw_max,
             logp_min=args.logp_min, logp_max=args.logp_max,
             max_mols=args.max_mols,
+            available_only=args.available,
         )
 
 
@@ -71,7 +71,6 @@ def cmd_screen(args):
     from pathlib import Path
     import yaml, glob
 
-    # Verifica se há ligante de referência
     state = {}
     if Path("vsdock_state.yaml").exists():
         state = yaml.safe_load(Path("vsdock_state.yaml").read_text())
@@ -79,7 +78,6 @@ def cmd_screen(args):
     if not state.get("has_reference_ligand", True) or not state.get("ligand_smiles"):
         print("[screen] Modo sem ligante de referência detectado.")
         print("[screen] Etapa de screening pulada — o banco será usado diretamente no docking.")
-        print("[screen] Para dockar, rode: vsdock dock --blind  (ou --autobox-residues)")
         return
 
     from vsdock.screen import screen, load_query_from_state
@@ -117,9 +115,38 @@ def cmd_analyze(args):
     filter_pains(hits_file=hits_file, outdir="hits", also_filter_lipinski=not args.no_lipinski)
 
 
+def _bank_to_hits_csv() -> str:
+    import glob
+    import pandas as pd
+    from pathlib import Path
+
+    candidates = glob.glob("zinc/*.smi") + glob.glob("zinc/*.csv")
+    if not candidates:
+        return None
+
+    src = candidates[0]
+    out = "hits/hits_from_bank.csv"
+    Path("hits").mkdir(exist_ok=True)
+
+    if src.endswith(".csv"):
+        return src
+
+    lines = [l.strip() for l in open(src) if l.strip()]
+    rows = []
+    for line in lines:
+        parts = line.split()
+        smiles = parts[0]
+        mol_id = parts[1] if len(parts) > 1 else f"mol_{len(rows)}"
+        rows.append({"smiles": smiles, "id": mol_id, "tanimoto": None})
+
+    pd.DataFrame(rows).to_csv(out, index=False)
+    print(f"[dock] Banco convertido: {len(rows)} moléculas → {out}")
+    return out
+
+
 def cmd_dock(args):
     from vsdock.dock import dock_all, get_box_from_autobox
-    import yaml, os, glob
+    import yaml, os
     from pathlib import Path
 
     state = {}
@@ -131,7 +158,6 @@ def cmd_dock(args):
         print("[dock] ERRO: receptor não definido.")
         raise SystemExit(1)
 
-    # --- Caixa de docking ---
     if args.autobox_ligand or args.autobox_residues or args.blind:
         pdb = args.pdb or state.get("pdb")
         if not pdb and not args.blind:
@@ -157,35 +183,28 @@ def cmd_dock(args):
     else:
         print(
             "[dock] ERRO: defina o sítio de docking com uma das opções:\n"
-            "  --autobox-ligand MRV1101A     (ligante cocristalizado)\n"
-            "  --autobox-residues VAL2A LYS4A (resíduos do sítio ativo)\n"
-            "  --blind                        (docking cego, proteína toda)\n"
-            "  --center X Y Z                 (coordenadas manuais)"
+            "  --autobox-ligand MRV1101A\n"
+            "  --autobox-residues VAL2A LYS4A\n"
+            "  --blind\n"
+            "  --center X Y Z"
         )
         raise SystemExit(1)
 
-    # --- Arquivo de hits ---
-    # Modo sem ligante: usa banco direto; modo com ligante: usa hits filtrados
-    has_ref = state.get("has_reference_ligand", True)
+    has_ref   = state.get("has_reference_ligand", True)
     hits_file = args.hits_file
 
     if not hits_file:
         if has_ref:
-            # Modo normal — prioriza hits filtrados pelo PAINS
             for c in ["hits/hits_clean.csv", "hits/hits.csv"]:
                 if os.path.exists(c):
                     hits_file = c
                     break
         else:
-            # Modo sem ligante — usa banco direto convertido para CSV
             hits_file = _bank_to_hits_csv()
 
     if not hits_file:
         print("[dock] ERRO: nenhum arquivo de moléculas encontrado.")
-        print("  Com ligante: rode 'vsdock screen' e 'vsdock analyze' primeiro.")
-        print("  Sem ligante: rode 'vsdock fetch --database' primeiro.")
         raise SystemExit(1)
-
     print(f"[dock] Moléculas detectadas: {hits_file}")
 
     dock_all(
@@ -195,38 +214,6 @@ def cmd_dock(args):
         reference_smiles=state.get("ligand_smiles"),
         reference_name=state.get("ligand_name", "reference"),
     )
-
-
-def _bank_to_hits_csv() -> str:
-    """
-    Converte banco .smi para CSV compatível com dock_all
-    quando não há ligante de referência.
-    """
-    import glob, pandas as pd
-    from pathlib import Path
-
-    candidates = glob.glob("zinc/*.smi") + glob.glob("zinc/*.csv")
-    if not candidates:
-        return None
-
-    src = candidates[0]
-    out = "hits/hits_from_bank.csv"
-    Path("hits").mkdir(exist_ok=True)
-
-    if src.endswith(".csv"):
-        return src
-
-    lines = [l.strip() for l in open(src) if l.strip()]
-    rows = []
-    for line in lines:
-        parts = line.split()
-        smiles = parts[0]
-        mol_id = parts[1] if len(parts) > 1 else f"mol_{len(rows)}"
-        rows.append({"smiles": smiles, "id": mol_id, "tanimoto": None})
-
-    pd.DataFrame(rows).to_csv(out, index=False)
-    print(f"[dock] Banco convertido: {len(rows)} moléculas → {out}")
-    return out
 
 
 def cmd_plip(args):
@@ -293,17 +280,15 @@ def main():
 
     # prepare
     p = subparsers.add_parser("prepare", help="Baixa e prepara receptor a partir de PDB ID ou arquivo")
-    p.add_argument("--pdbid", default=None, help="PDB ID (ex: 4MBS)")
-    p.add_argument("--pdb-file", default=None, dest="pdb_file", help="Arquivo PDB local")
-    p.add_argument("--ligand-code", default=None, dest="ligand_code",
-                   help="Código de 3 letras do ligante no PDB (omitir se não houver ligante)")
+    p.add_argument("--pdbid", default=None)
+    p.add_argument("--pdb-file", default=None, dest="pdb_file")
+    p.add_argument("--ligand-code", default=None, dest="ligand_code")
     p.set_defaults(func=cmd_prepare)
 
     # init
     p = subparsers.add_parser("init", help="Inicializa projeto")
-    p.add_argument("--target", required=True, help="Nome do arquivo .pdbqt do receptor")
-    p.add_argument("--ligand", default=None,
-                   help="Nome do ligante de referência no PubChem (omitir para modo receptor-only)")
+    p.add_argument("--target", required=True)
+    p.add_argument("--ligand", default=None)
     p.add_argument("--config", default="configs/default.yaml")
     p.set_defaults(func=cmd_init)
 
@@ -318,10 +303,12 @@ def main():
     p.add_argument("--logp-min", type=float, default=-1, dest="logp_min")
     p.add_argument("--logp-max", type=float, default=5, dest="logp_max")
     p.add_argument("--max-mols", type=int, default=500, dest="max_mols")
+    p.add_argument("--available", action="store_true",
+                   help="Filtra apenas compostos comercialmente disponíveis (ChEMBL)")
     p.set_defaults(func=cmd_fetch)
 
     # screen
-    p = subparsers.add_parser("screen", help="Triagem por similaridade (requer ligante de referência)")
+    p = subparsers.add_parser("screen", help="Triagem por similaridade estrutural")
     p.add_argument("--similarity", type=float, default=0.4)
     p.add_argument("--fingerprint", choices=["morgan", "maccs", "rdkit"], default="morgan")
     p.add_argument("--radius", type=int, default=2)
@@ -339,12 +326,9 @@ def main():
     p = subparsers.add_parser("dock", help="Docking com AutoDock Vina")
     p.add_argument("--receptor", default=None)
     p.add_argument("--pdb", default=None)
-    p.add_argument("--autobox-ligand", default=None, dest="autobox_ligand",
-                   help="Ligante cocristalizado para definir caixa (ex: MRV1101A)")
-    p.add_argument("--autobox-residues", nargs="+", default=None, dest="autobox_residues",
-                   help="Resíduos do sítio ativo (ex: VAL2A LYS4A)")
-    p.add_argument("--blind", action="store_true",
-                   help="Blind docking — caixa cobre a proteína toda")
+    p.add_argument("--autobox-ligand", default=None, dest="autobox_ligand")
+    p.add_argument("--autobox-residues", nargs="+", default=None, dest="autobox_residues")
+    p.add_argument("--blind", action="store_true")
     p.add_argument("--padding", type=float, default=5.0)
     p.add_argument("--center", nargs=3, type=float, metavar=("X", "Y", "Z"))
     p.add_argument("--size", nargs=3, type=float, metavar=("SX", "SY", "SZ"), default=None)

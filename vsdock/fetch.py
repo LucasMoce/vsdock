@@ -1,7 +1,7 @@
 """
 vsdock.fetch
 ============
-Download do ligante de referência (PubChem) e de bancos moleculares (ZINC20).
+Download do ligante de referência (PubChem) e de bancos moleculares (ChEMBL/ZINC).
 """
 
 import os
@@ -11,33 +11,21 @@ from pathlib import Path
 from tqdm import tqdm
 
 
+PUBCHEM_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+CHEMBL_BASE  = "https://www.ebi.ac.uk/chembl/api/data"
+ZINC20_BASE  = "https://zinc20.docking.org"
+
+
 # ---------------------------------------------------------------------------
 # PubChem
 # ---------------------------------------------------------------------------
 
-PUBCHEM_BASE = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
-
-
 def fetch_ligand(name: str, outdir: str = ".", fmt: str = "sdf") -> Path:
-    """
-    Baixa a estrutura 2D/3D de um ligante pelo nome via PubChem.
-
-    Parâmetros
-    ----------
-    name   : nome do composto (ex: "maraviroc", "imatinib")
-    outdir : pasta de destino
-    fmt    : formato de saída — "sdf" ou "smiles"
-
-    Retorna
-    -------
-    Path do arquivo baixado
-    """
+    """Baixa estrutura do ligante via PubChem."""
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
     print(f"[fetch] Buscando '{name}' no PubChem...")
-
-    # 1. Resolve o nome para CID
     resp = requests.get(
         f"{PUBCHEM_BASE}/compound/name/{requests.utils.quote(name)}/cids/JSON",
         timeout=15,
@@ -46,12 +34,11 @@ def fetch_ligand(name: str, outdir: str = ".", fmt: str = "sdf") -> Path:
     cid = resp.json()["IdentifierList"]["CID"][0]
     print(f"[fetch] CID encontrado: {cid}")
 
-    # 2. Baixa a estrutura no formato desejado
     if fmt == "sdf":
-        url = f"{PUBCHEM_BASE}/compound/cid/{cid}/SDF?record_type=3d"
+        url    = f"{PUBCHEM_BASE}/compound/cid/{cid}/SDF?record_type=3d"
         suffix = ".sdf"
     else:
-        url = f"{PUBCHEM_BASE}/compound/cid/{cid}/property/IsomericSMILES/TXT"
+        url    = f"{PUBCHEM_BASE}/compound/cid/{cid}/property/IsomericSMILES/TXT"
         suffix = ".smi"
 
     resp = requests.get(url, timeout=15)
@@ -64,10 +51,7 @@ def fetch_ligand(name: str, outdir: str = ".", fmt: str = "sdf") -> Path:
 
 
 def fetch_ligand_smiles(name: str) -> str:
-    """
-    Retorna apenas o SMILES canônico do ligante (sem salvar arquivo).
-    Útil para passar direto pro módulo de screening.
-    """
+    """Retorna o SMILES canônico do ligante via PubChem."""
     resp = requests.get(
         f"{PUBCHEM_BASE}/compound/name/{requests.utils.quote(name)}/property/IsomericSMILES/TXT",
         timeout=15,
@@ -79,12 +63,8 @@ def fetch_ligand_smiles(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Banco molecular — ChEMBL (principal) + ZINC20 (opcional)
+# Banco molecular — ChEMBL (principal) + ZINC (opcional)
 # ---------------------------------------------------------------------------
-
-CHEMBL_BASE = "https://www.ebi.ac.uk/chembl/api/data"
-ZINC20_BASE = "https://zinc20.docking.org"
-
 
 def fetch_database(
     outdir: str = ".",
@@ -94,34 +74,32 @@ def fetch_database(
     logp_min: float = -1,
     logp_max: float = 5,
     max_mols: int = 500,
+    available_only: bool = False,
 ) -> Path:
     """
-    Baixa banco de moléculas pequenas para screening.
+    Baixa banco de moléculas para screening.
 
     Parâmetros
     ----------
-    outdir   : pasta de destino
-    source   : "chembl" (padrão, estável) | "zinc" | "local"
-    mw_min/max   : intervalo de peso molecular
-    logp_min/max : intervalo de logP
-    max_mols : número máximo de moléculas
-
-    Retorna
-    -------
-    Path do arquivo .smi gerado
+    outdir         : pasta de destino
+    source         : "chembl" (padrão) ou "zinc"
+    mw_min/max     : intervalo de peso molecular
+    logp_min/max   : intervalo de logP
+    max_mols       : número máximo de moléculas
+    available_only : filtra apenas compostos comercialmente disponíveis (ChEMBL)
     """
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
     if source == "chembl":
-        return _fetch_chembl(outdir, mw_min, mw_max, logp_min, logp_max, max_mols)
+        return _fetch_chembl(outdir, mw_min, mw_max, logp_min, logp_max, max_mols, available_only)
     elif source == "zinc":
         return _fetch_zinc(outdir, mw_min, mw_max, logp_min, logp_max, max_mols)
     else:
         raise ValueError(f"Fonte desconhecida: {source}. Use 'chembl' ou 'zinc'.")
 
 
-# Mantém fetch_zinc como alias para compatibilidade
+# alias para compatibilidade
 def fetch_zinc(outdir=".", availability="for-sale", mw_min=150, mw_max=500,
                logp_min=-1, logp_max=5, max_mols=500):
     return fetch_database(outdir=outdir, source="zinc", mw_min=mw_min,
@@ -136,15 +114,15 @@ def _fetch_chembl(
     logp_min: float,
     logp_max: float,
     max_mols: int,
+    available_only: bool = False,
 ) -> Path:
-    """
-    Baixa moléculas do ChEMBL via API REST com filtros de propriedade.
-    Retorna arquivo .smi com formato: SMILES<tab>ID
-    """
+    """Baixa moléculas do ChEMBL com retry automático."""
     print(f"[fetch] Conectando ao ChEMBL...")
-    print(f"  MW   : {mw_min}–{mw_max}")
-    print(f"  logP : {logp_min}–{logp_max}")
-    print(f"  Máx. : {max_mols} moléculas")
+    print(f"  MW              : {mw_min}–{mw_max}")
+    print(f"  logP            : {logp_min}–{logp_max}")
+    print(f"  Máx.            : {max_mols} moléculas")
+    if available_only:
+        print(f"  Disponibilidade : apenas comercialmente disponíveis")
 
     params = {
         "molecule_properties__mw_freebase__lte": mw_max,
@@ -156,17 +134,43 @@ def _fetch_chembl(
         "offset": 0,
     }
 
-    outfile = outdir / "chembl_database.smi"
+    # availability_type=1 → comercialmente disponível no ChEMBL
+    if available_only:
+        params["availability_type"] = 1
+
+    outfile   = outdir / "chembl_database.smi"
     all_lines = []
 
     with tqdm(total=max_mols, desc="Baixando ChEMBL", unit=" mols") as pbar:
         while len(all_lines) < max_mols:
-            resp = requests.get(
-                f"{CHEMBL_BASE}/molecule.json",
-                params=params,
-                timeout=30,
-            )
-            resp.raise_for_status()
+
+            # Retry automático até 3 vezes por página
+            resp = None
+            for attempt in range(3):
+                try:
+                    resp = requests.get(
+                        f"{CHEMBL_BASE}/molecule.json",
+                        params=params,
+                        timeout=60,
+                    )
+                    resp.raise_for_status()
+                    break
+                except requests.exceptions.Timeout:
+                    if attempt < 2:
+                        print(f"\n[fetch] Timeout, tentando novamente ({attempt+2}/3)...")
+                        time.sleep(5)
+                    else:
+                        print(f"\n[fetch] ChEMBL não respondeu. {len(all_lines)} moléculas salvas.")
+                        resp = None
+                        break
+                except requests.exceptions.RequestException as e:
+                    print(f"\n[fetch] Erro de conexão: {e}")
+                    resp = None
+                    break
+
+            if resp is None:
+                break
+
             data = resp.json()
             mols = data.get("molecules", [])
 
@@ -174,8 +178,8 @@ def _fetch_chembl(
                 break
 
             for mol in mols:
-                structs = mol.get("molecule_structures") or {}
-                smiles = structs.get("canonical_smiles", "")
+                structs   = mol.get("molecule_structures") or {}
+                smiles    = structs.get("canonical_smiles", "")
                 chembl_id = mol.get("molecule_chembl_id", "")
                 if smiles:
                     all_lines.append(f"{smiles}\t{chembl_id}")
@@ -183,13 +187,12 @@ def _fetch_chembl(
                 if len(all_lines) >= max_mols:
                     break
 
-            # Paginação
             next_url = data.get("page_meta", {}).get("next")
             if not next_url or len(all_lines) >= max_mols:
                 break
 
             params["offset"] += params["limit"]
-            time.sleep(0.2)
+            time.sleep(0.5)
 
     outfile.write_text("\n".join(all_lines))
     print(f"[fetch] {len(all_lines)} moléculas salvas em: {outfile}")
@@ -204,38 +207,33 @@ def _fetch_zinc(
     logp_max: float,
     max_mols: int,
 ) -> Path:
-    """
-    Tenta baixar do ZINC20. Se falhar por SSL, orienta o usuário
-    a baixar manualmente e usar --source local.
-    """
+    """Tenta baixar do ZINC20. Se falhar por SSL, orienta o usuário."""
     print(f"[fetch] Conectando ao ZINC20...")
     print(f"  MW   : {mw_min}–{mw_max}")
     print(f"  logP : {logp_min}–{logp_max}")
     print(f"  Máx. : {max_mols} moléculas")
 
-    url = f"{ZINC20_BASE}/substances/subsets/for-sale.smi"
+    url    = f"{ZINC20_BASE}/substances/subsets/for-sale.smi"
     params = {
-        "mw": f"{mw_min}:{mw_max}",
-        "logp": f"{logp_min}:{logp_max}",
-        "count": min(max_mols, 1000),
-        "output_fields": "zinc_id,smiles",
+        "mw":           f"{mw_min}:{mw_max}",
+        "logp":         f"{logp_min}:{logp_max}",
+        "count":        min(max_mols, 1000),
+        "output_fields":"zinc_id,smiles",
     }
 
     try:
         resp = requests.get(url, params=params, timeout=60, stream=True, verify=False)
         resp.raise_for_status()
-    except requests.exceptions.SSLError:
+    except (requests.exceptions.SSLError, requests.exceptions.HTTPError):
         print(
-            "\n[fetch] ERRO: ZINC20 recusou a conexão SSL.\n"
-            "  O ZINC20 tem instabilidade frequente de SSL.\n"
-            "  Alternativas:\n"
-            "    1) Use --source chembl (recomendado)\n"
-            "    2) Baixe manualmente em https://zinc20.docking.org e use --source local\n"
+            "\n[fetch] ERRO: ZINC20 inacessível (SSL ou HTTP error).\n"
+            "  Use --source chembl (recomendado) ou baixe manualmente em:\n"
+            "  https://zinc20.docking.org\n"
         )
         raise SystemExit(1)
 
     outfile = outdir / "zinc_database.smi"
-    lines = []
+    lines   = []
     for line in tqdm(resp.iter_lines(), desc="Baixando ZINC", unit=" mols"):
         if line:
             lines.append(line.decode("utf-8"))

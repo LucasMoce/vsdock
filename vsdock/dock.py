@@ -38,7 +38,7 @@ def _check_deps():
 
 
 # ---------------------------------------------------------------------------
-# Autobox — geração automática de caixa de docking
+# Autobox
 # ---------------------------------------------------------------------------
 
 def get_box_from_autobox(
@@ -50,18 +50,6 @@ def get_box_from_autobox(
 ) -> dict:
     """
     Usa o autobox para calcular automaticamente as coordenadas da caixa de docking.
-
-    Parâmetros
-    ----------
-    pdb_file  : arquivo PDB do receptor (com ligante cocristalizado)
-    ligand    : identificador do ligante no PDB (ex: "MRV1101A")
-    residues  : lista de resíduos (ex: ["VAL2A", "LYS4A"])
-    padding   : padding em Angstroms ao redor do ligante/resíduos
-    blind     : se True, faz docking cego (caixa = proteína toda)
-
-    Retorna
-    -------
-    dict com center (x,y,z) e size (x,y,z)
     """
     if not shutil.which("autobox"):
         raise EnvironmentError(
@@ -78,13 +66,20 @@ def get_box_from_autobox(
     elif residues:
         cmd += ["--residues"] + residues
     else:
-        raise ValueError("Informe --ligand, --residues ou --blind para o autobox.")
+        raise ValueError("Informe ligand, residues ou blind=True.")
 
     result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"autobox falhou:\n{result.stderr}")
 
-    # Parseia output: "x_center=149.85\ny_center=108.41\n..."
+    if result.returncode != 0 or not result.stdout.strip():
+        stderr = result.stderr.strip()
+        raise RuntimeError(
+            f"autobox falhou.\n"
+            f"{stderr}\n\n"
+            f"Dica: verifique se os resíduos/ligante existem no PDB com:\n"
+            f"  grep '^ATOM' arquivo.pdb | awk '{{print $4, $6, $5}}' | sort -u\n"
+            f"Formato esperado: NOME+NÚMERO+CADEIA sem espaço (ex: TRP86A, TYR251A)"
+        )
+
     box = {}
     for line in result.stdout.splitlines():
         if "=" in line:
@@ -105,15 +100,30 @@ def get_box_from_autobox(
 # Conversão SMILES -> PDBQT
 # ---------------------------------------------------------------------------
 
-def smiles_to_pdbqt(smiles: str, mol_id: str, outdir: Path) -> Path | None:
+def smiles_to_pdbqt(smiles: str, mol_id: str, outdir: Path) -> Path:
     """
     Converte um SMILES para PDBQT com coordenadas 3D.
+    Sanitiza automaticamente sais e misturas (ex: remove .Cl, .Na).
     Retorna o Path do arquivo .pdbqt ou None se falhar.
     """
-    sdf_path  = outdir / f"{mol_id}.sdf"
+    sdf_path   = outdir / f"{mol_id}.sdf"
     pdbqt_path = outdir / f"{mol_id}.pdbqt"
 
-    # 1. SMILES -> SDF com geometria 3D via RDKit
+    # Sanitização: pega o maior fragmento (remove sais/contrafragmentos)
+    if "." in smiles:
+        fragments = smiles.split(".")
+        best = None
+        best_smi = smiles
+        for frag in fragments:
+            mol_frag = Chem.MolFromSmiles(frag)
+            if mol_frag is None:
+                continue
+            if best is None or mol_frag.GetNumHeavyAtoms() > best.GetNumHeavyAtoms():
+                best = mol_frag
+                best_smi = frag
+        smiles = best_smi
+
+    # Gera geometria 3D
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return None
@@ -121,7 +131,6 @@ def smiles_to_pdbqt(smiles: str, mol_id: str, outdir: Path) -> Path | None:
     mol = Chem.AddHs(mol)
     result = AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
     if result != 0:
-        # Fallback: tenta ETKDG sem constraints
         result = AllChem.EmbedMolecule(mol, AllChem.ETKDG())
     if result != 0:
         return None
@@ -132,16 +141,15 @@ def smiles_to_pdbqt(smiles: str, mol_id: str, outdir: Path) -> Path | None:
     writer.write(mol)
     writer.close()
 
-    # 2. SDF -> PDBQT via Open Babel
+    # Converte para PDBQT via Open Babel
     cmd = [
         "obabel", str(sdf_path),
         "-O", str(pdbqt_path),
         "--partialcharge", "gasteiger",
-        "-h",  # adiciona H se necessário
+        "-h",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
-
-    sdf_path.unlink(missing_ok=True)  # limpa SDF temporário
+    sdf_path.unlink(missing_ok=True)
 
     if not pdbqt_path.exists():
         return None
@@ -162,23 +170,9 @@ def run_vina(
     num_modes: int = 9,
     energy_range: int = 3,
     out_dir: Path = None,
-) -> float | None:
+) -> float:
     """
     Roda o AutoDock Vina para um ligante e retorna o melhor score (kcal/mol).
-
-    Parâmetros
-    ----------
-    ligand_pdbqt  : Path do ligante em PDBQT
-    receptor_pdbqt: Path do receptor em PDBQT
-    center        : (x, y, z) do centro da caixa de docking
-    size          : (sx, sy, sz) tamanho da caixa em Angstroms
-    exhaustiveness: exaustividade da busca (default 8)
-    num_modes     : número de poses a gerar
-    energy_range  : range de energia para poses alternativas
-
-    Retorna
-    -------
-    Melhor score em kcal/mol ou None se falhar
     """
     out_pdbqt = out_dir / f"{ligand_pdbqt.stem}_out.pdbqt"
 
@@ -203,15 +197,12 @@ def run_vina(
     if result.returncode != 0:
         return None
 
-    # Parseia o score da saída do Vina
-    score = _parse_vina_score(result.stdout)
-    return score
+    return _parse_vina_score(result.stdout)
 
 
-def _parse_vina_score(vina_output: str) -> float | None:
+def _parse_vina_score(vina_output: str) -> float:
     """Extrai o melhor score (modo 1) da saída do Vina."""
     for line in vina_output.splitlines():
-        # Linha do melhor modo: "   1      -7.5      0.000      0.000"
         match = re.match(r"\s+1\s+([-\d.]+)", line)
         if match:
             return float(match.group(1))
@@ -236,27 +227,11 @@ def dock_all(
 ) -> pd.DataFrame:
     """
     Roda docking de todos os hits + ligante de referência.
-
-    Parâmetros
-    ----------
-    hits_file        : CSV de hits limpos (saída do pains)
-    receptor         : Path do receptor .pdbqt
-    center           : (x, y, z) centro da caixa
-    size             : (sx, sy, sz) tamanho da caixa
-    outdir           : pasta de saída
-    exhaustiveness   : exaustividade Vina
-    num_modes        : poses por ligante
-    top_n            : limita número de hits (None = todos)
-    reference_smiles : SMILES do ligante de referência (docka junto)
-    reference_name   : nome do ligante de referência
-
-    Retorna
-    -------
-    DataFrame ranqueado por score com colunas: id, smiles, score_kcal_mol
+    O ligante de referência é sempre incluído independente do screening.
     """
     _check_deps()
 
-    outdir = Path(outdir)
+    outdir    = Path(outdir)
     pdbqt_dir = outdir / "pdbqt"
     poses_dir = outdir / "poses"
     pdbqt_dir.mkdir(parents=True, exist_ok=True)
@@ -265,7 +240,6 @@ def dock_all(
     if not Path(receptor).exists():
         raise FileNotFoundError(f"Receptor não encontrado: {receptor}")
 
-    # Carrega hits
     df_hits = pd.read_csv(hits_file)
     if top_n:
         df_hits = df_hits.head(top_n)
@@ -276,29 +250,42 @@ def dock_all(
     print(f"  Caixa          : {size} Å")
     print(f"  Exhaustiveness : {exhaustiveness}")
 
-    # Adiciona ligante de referência à lista
+    # Monta lista — referência sempre primeiro, nunca duplicada
     rows = []
     if reference_smiles:
-        rows.append({"id": reference_name, "smiles": reference_smiles, "tanimoto": 1.0})
+        rows.append({
+            "id": reference_name,
+            "smiles": reference_smiles,
+            "tanimoto": 1.0,
+            "is_reference": True,
+        })
 
     for _, row in df_hits.iterrows():
-        rows.append({"id": row["id"], "smiles": row["smiles"], "tanimoto": row.get("tanimoto", None)})
+        if str(row["id"]) == reference_name:
+            continue  # evita duplicar
+        rows.append({
+            "id": row["id"],
+            "smiles": row["smiles"],
+            "tanimoto": row.get("tanimoto", None),
+            "is_reference": False,
+        })
 
     results = []
-    failed = []
+    failed  = []
 
     for entry in tqdm(rows, desc="Docking", unit=" mol"):
-        mol_id  = str(entry["id"]).replace("/", "_").replace(" ", "_")
-        smiles  = entry["smiles"]
+        mol_id   = str(entry["id"]).replace("/", "_").replace(" ", "_")
+        smiles   = entry["smiles"]
         tanimoto = entry.get("tanimoto")
+        is_ref   = entry.get("is_reference", False)
 
-        # Converte para PDBQT
         pdbqt_path = smiles_to_pdbqt(smiles, mol_id, pdbqt_dir)
         if pdbqt_path is None:
             failed.append(mol_id)
+            if is_ref:
+                print(f"[dock] AVISO: ligante de referência '{mol_id}' falhou na conversão PDBQT.")
             continue
 
-        # Roda Vina
         score = run_vina(
             ligand_pdbqt=pdbqt_path,
             receptor_pdbqt=receptor,
@@ -311,13 +298,16 @@ def dock_all(
 
         if score is None:
             failed.append(mol_id)
+            if is_ref:
+                print(f"[dock] AVISO: Vina falhou para o ligante de referência '{mol_id}'.")
             continue
 
         results.append({
-            "id": entry["id"],
-            "smiles": smiles,
-            "tanimoto": tanimoto,
+            "id":             entry["id"],
+            "smiles":         smiles,
+            "tanimoto":       tanimoto,
             "score_kcal_mol": score,
+            "is_reference":   is_ref,
         })
 
     if failed:
@@ -325,21 +315,27 @@ def dock_all(
 
     df = pd.DataFrame(results).sort_values("score_kcal_mol").reset_index(drop=True)
 
-    # Marca hits melhores que o ligante de referência
-    if reference_smiles and len(df) > 0:
-        ref_row = df[df["id"] == reference_name]
-        if not ref_row.empty:
-            ref_score = ref_row.iloc[0]["score_kcal_mol"]
-            df["better_than_ref"] = df["score_kcal_mol"] < ref_score
-            print(f"\n[dock] Score do ligante de referência : {ref_score} kcal/mol")
-            n_better = df[df["id"] != reference_name]["better_than_ref"].sum()
-            print(f"[dock] Hits melhores que referência   : {n_better}")
+    # Estatísticas comparativas
+    ref_rows = df[df["is_reference"] == True]
+    if not ref_rows.empty:
+        ref_score = ref_rows.iloc[0]["score_kcal_mol"]
+        df["better_than_ref"] = df["score_kcal_mol"] < ref_score
+        n_better = df[~df["is_reference"]]["better_than_ref"].sum()
+        print(f"\n[dock] Score do ligante de referência ({reference_name}): {ref_score} kcal/mol")
+        print(f"[dock] Hits melhores que referência: {n_better}")
+    else:
+        df["better_than_ref"] = False
 
-    # Salva resultados
     out_csv = outdir / "docking_results.csv"
     df.to_csv(out_csv, index=False)
+
     print(f"\n[dock] Resultados salvos em: {out_csv}")
-    print(f"\n[dock] Top 10:")
-    print(df.head(10)[["id", "score_kcal_mol", "tanimoto"]].to_string(index=False))
+    print(f"\n[dock] Top 10 (★ = ligante de referência):")
+
+    display = df.head(10)[["id", "score_kcal_mol", "tanimoto", "is_reference"]].copy()
+    display["id"] = display.apply(
+        lambda r: f"★ {r['id']}" if r["is_reference"] else r["id"], axis=1
+    )
+    print(display[["id", "score_kcal_mol", "tanimoto"]].to_string(index=False))
 
     return df

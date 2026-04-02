@@ -341,6 +341,7 @@ def cmd_admet(args):
             filters=args.apply_filters,
             outdir="admet",
             reference_name=state.get("ligand_name"),
+            thresholds_str=args.thresholds,
         )
 
 
